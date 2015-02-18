@@ -5,7 +5,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/ExecutionEngine/JIT.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/Support/TargetSelect.h"
 #include <stdio.h>
@@ -146,8 +146,11 @@ int main(int argc, char** argv)
   values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
 
   InitializeNativeTarget();
+  InitializeNativeTargetAsmPrinter();
+  InitializeNativeTargetAsmParser();
   Module* module = funcIR();
-  ExecutionEngine* engine = EngineBuilder(module).create();
+  ExecutionEngine* engine = EngineBuilder(module).setUseMCJIT(true).create();
+  engine->finalizeObject();
   void* funcPtr = engine->getPointerToFunction(module->getFunction("func"));
 
   void(*llvmfunc)(TRow, TValue*) = (void (*)(TRow, TValue*))funcPtr;
