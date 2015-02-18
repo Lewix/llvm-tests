@@ -10,6 +10,7 @@
 #include "llvm/Support/TargetSelect.h"
 #include <stdio.h>
 #include <stdint.h>
+#include <dlfcn.h>
 using namespace llvm;
 
 typedef int64_t i64;
@@ -145,6 +146,12 @@ int main(int argc, char** argv)
   values[1] = { 0, EValueType::Int64, 0, { 500 } }; // int64(500)
   values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
 
+  // Run func
+  func(row, &values[2]);
+  printf("func execution: %ld\n", (long)values[2].Data.Int64);
+  values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
+
+  // Run JIT-compiled func
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
   InitializeNativeTargetAsmParser();
@@ -156,5 +163,14 @@ int main(int argc, char** argv)
   void(*llvmfunc)(TRow, TValue*) = (void (*)(TRow, TValue*))funcPtr;
   llvmfunc(row, &(values[2]));
 
-  printf("%ld\n", (long)values[2].Data.Int64);
+  printf("JIT-compiled execution: %ld\n", (long)values[2].Data.Int64);
+  values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
+
+  // Run func from .so file
+  void* dynamicLib = dlopen("func.so", RTLD_LAZY);
+  void* funcSym = dlsym(dynamicLib, "func");
+  void(*sofunc)(TRow, TValue*) = (void (*)(TRow, TValue*))funcSym;
+  sofunc(row, &(values[2]));
+
+  printf(".so execution: %ld\n", (long)values[2].Data.Int64);
 }
