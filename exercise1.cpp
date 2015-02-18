@@ -135,39 +135,7 @@ Module* funcIR()
   return module;
 }
 
-Module* funcPrototypeIR()
-{
-  LLVMContext &context = getGlobalContext();
-  Module* module = new Module("addition func", context);
-  IRBuilder<> builder(context);
-
-  FunctionType* funTp = TypeBuilder<void(TRow, TValue*), true>::get(context);
-
-  Function* function = Function::Create(funTp, Function::ExternalLinkage, "func", module);
-  module->dump();
-
-  return module;
-}
-
-class SharedObjectMemoryManager : public SectionMemoryManager
-{
-  SharedObjectMemoryManager(const SharedObjectMemoryManager&) LLVM_DELETED_FUNCTION;
-  void operator=(const SharedObjectMemoryManager&) LLVM_DELETED_FUNCTION;
-
- public:
-  SharedObjectMemoryManager() {}
-  virtual ~SharedObjectMemoryManager() {}
-  virtual void* getPointerToNamedFunction(const std::string &name, bool abortOnFailure = true);
-};
-
-void* SharedObjectMemoryManager::getPointerToNamedFunction(const std::string &name, bool abortOnFailure)
-{
-  printf("RUNNING SHARED OBJECT MEM MANAGER\n");
-  void* funcPtr = SectionMemoryManager::getPointerToNamedFunction(name, false);
-  if (funcPtr) {
-    return funcPtr;
-  }
-
+void* functionCreator(const std::string& name) {
   void* dynamicLib = dlopen("func.so", RTLD_LAZY);
   return dlsym(dynamicLib, "func");
 }
@@ -192,12 +160,12 @@ int main(int argc, char** argv)
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
   InitializeNativeTargetAsmParser();
-  Module* module = funcPrototypeIR();
+  Module* module = new Module("empty", getGlobalContext());
   ExecutionEngine* engine = EngineBuilder(module)
     .setUseMCJIT(true)
-    .setMCJITMemoryManager(new SharedObjectMemoryManager())
     .create();
 
+  engine->InstallLazyFunctionCreator(functionCreator);
   engine->finalizeObject();
   void* funcPtr = engine->getPointerToNamedFunction("func");
 
