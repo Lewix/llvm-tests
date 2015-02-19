@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <dlfcn.h>
+#include <iostream>
+#include <string>
 using namespace llvm;
 
 typedef int64_t i64;
@@ -87,16 +89,17 @@ void func(TRow row, TValue* result)
   result->Data.Int64 = values[0].Data.Int64 + values[1].Data.Int64;
 }
 
-Module* funcIR()
+void funcIR(Module* module)
 {
   LLVMContext &context = getGlobalContext();
-  Module* module = new Module("addition func", context);
   IRBuilder<> builder(context);
 
   FunctionType* funTp = TypeBuilder<void(TRow, TValue*), true>::get(context);
+  Type* tvalueTp = TypeBuilder<TValue, true>::get(context);
   Type* tvaluePtrTp = TypeBuilder<TValue*, true>::get(context);
 
   Function* function = Function::Create(funTp, Function::ExternalLinkage, "func", module);
+  Function* udf = Function::Create(funTp, Function::ExternalLinkage, "myudf", module);
   BasicBlock* body = BasicBlock::Create(context, "entry", function);
   builder.SetInsertPoint(body);
 
@@ -122,19 +125,52 @@ Module* funcIR()
   // i64 valueSum = value0Data + value1Data
   Value* valueSum = builder.CreateAdd(value0Data, value1Data, "valueSum");
 
-  // result->Data.Int64 = resultSum;
+  // Now call "func" from the .so file and add this to the result
+  // { i16, 16, i32, i64 } udfResult = alloca t_value
+  Value* udfResult = builder.CreateAlloca(tvalueTp);
+  // call myudf(row result) 
+  builder.CreateCall2(udf, rowArg, udfResult);
+  // i64 udfData = result->Data.Int64
+  Value* udfDataPtr = builder.CreateConstInBoundsGEP2_32(udfResult, 0, 3);
+  Value* udfData = builder.CreateLoad(udfDataPtr, "udfData");
+  // i64 udfSum = valueSum + udfData
+  Value* udfSum = builder.CreateAdd(valueSum, udfData, "udfSum");
+
+  // result->Data.Int64 = udfSum;
   Value* resultDataPtr = builder.CreateConstInBoundsGEP2_32(resultArg, 0, 3);
-  builder.CreateStore(valueSum, resultDataPtr);
+  builder.CreateStore(udfSum, resultDataPtr);
 
   builder.CreateRetVoid();
 
   verifyFunction(*function);
 
   module->dump();
-
-  return module;
 }
 
+class SharedObjectMemoryManager : public SectionMemoryManager
+{
+  SharedObjectMemoryManager(const SharedObjectMemoryManager&) LLVM_DELETED_FUNCTION;
+  void operator=(const SharedObjectMemoryManager&) LLVM_DELETED_FUNCTION;
+
+public:
+  SharedObjectMemoryManager() {}
+  virtual ~SharedObjectMemoryManager() {}
+
+  virtual uint64_t getSymbolAddress(const std::string &Name);
+};
+
+uint64_t SharedObjectMemoryManager::getSymbolAddress(const std::string &Name)
+{
+  // Gets called when "call" cannot find the function
+  uint64_t addr = SectionMemoryManager::getSymbolAddress(Name);
+  if (!addr) {
+    void* dynamicLib = dlopen("func.so", RTLD_LAZY);
+    return (uint64_t)dlsym(dynamicLib, "func");
+  }
+  return addr;
+}
+
+// Gets called when getPointerToNamedFunction cannot find the function
 void* functionCreator(const std::string& name) {
   void* dynamicLib = dlopen("func.so", RTLD_LAZY);
   return dlsym(dynamicLib, "func");
@@ -160,9 +196,11 @@ int main(int argc, char** argv)
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
   InitializeNativeTargetAsmParser();
-  Module* module = new Module("empty", getGlobalContext());
+  Module* module = new Module("addition_func", getGlobalContext());
+  funcIR(module);
   ExecutionEngine* engine = EngineBuilder(module)
     .setUseMCJIT(true)
+    .setMCJITMemoryManager(new SharedObjectMemoryManager())
     .create();
 
   engine->InstallLazyFunctionCreator(functionCreator);
