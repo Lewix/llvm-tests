@@ -8,6 +8,7 @@
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Object/ObjectFile.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <dlfcn.h>
@@ -157,6 +158,9 @@ public:
   virtual ~SharedObjectMemoryManager() {}
 
   virtual uint64_t getSymbolAddress(const std::string &Name);
+
+private:
+  ExecutionEngine* udfEngine = NULL;
 };
 
 uint64_t SharedObjectMemoryManager::getSymbolAddress(const std::string &Name)
@@ -164,16 +168,20 @@ uint64_t SharedObjectMemoryManager::getSymbolAddress(const std::string &Name)
   // Gets called when "call" cannot find the function
   uint64_t addr = SectionMemoryManager::getSymbolAddress(Name);
   if (!addr) {
-    void* dynamicLib = dlopen("func.so", RTLD_LAZY);
-    return (uint64_t)dlsym(dynamicLib, "func");
+    if (!udfEngine) {
+      Module* udfModule = new Module("udf", getGlobalContext());
+      udfEngine = EngineBuilder(udfModule).setUseMCJIT(true).create();
+
+      ErrorOr<std::unique_ptr<MemoryBuffer>> buffer = MemoryBuffer::getFile("func.so");
+      ErrorOr<std::unique_ptr<object::ObjectFile>> object = object::ObjectFile::createObjectFile(buffer.get());
+
+      udfEngine->addObjectFile(move(object.get()));
+      udfEngine->finalizeObject();
+    }
+
+    addr = (uint64_t)udfEngine->getPointerToNamedFunction(Name);
   }
   return addr;
-}
-
-// Gets called when getPointerToNamedFunction cannot find the function
-void* functionCreator(const std::string& name) {
-  void* dynamicLib = dlopen("func.so", RTLD_LAZY);
-  return dlsym(dynamicLib, "func");
 }
 
 int main(int argc, char** argv)
@@ -187,11 +195,6 @@ int main(int argc, char** argv)
   values[1] = { 0, EValueType::Int64, 0, { 500 } }; // int64(500)
   values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
 
-  // Run func
-  func(row, &values[2]);
-  printf("func execution: %ld\n", (long)values[2].Data.Int64);
-  values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
-
   // Run JIT-compiled func
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
@@ -203,7 +206,6 @@ int main(int argc, char** argv)
     .setMCJITMemoryManager(new SharedObjectMemoryManager())
     .create();
 
-  engine->InstallLazyFunctionCreator(functionCreator);
   engine->finalizeObject();
   void* funcPtr = engine->getPointerToNamedFunction("func");
 
@@ -212,12 +214,4 @@ int main(int argc, char** argv)
 
   printf("JIT-compiled execution: %ld\n", (long)values[2].Data.Int64);
   values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
-
-  // Run func from .so file
-  void* dynamicLib = dlopen("func.so", RTLD_LAZY);
-  void* funcSym = dlsym(dynamicLib, "func");
-  void(*sofunc)(TRow, TValue*) = (void (*)(TRow, TValue*))funcSym;
-  sofunc(row, &(values[2]));
-
-  printf(".so execution: %ld\n", (long)values[2].Data.Int64);
 }
