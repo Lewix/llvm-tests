@@ -1,3 +1,8 @@
+#include <stdio.h>
+#include <stdint.h>
+#include <dlfcn.h>
+#include <iostream>
+#include <string>
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
@@ -9,80 +14,9 @@
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Object/ObjectFile.h"
-#include <stdio.h>
-#include <stdint.h>
-#include <dlfcn.h>
-#include <iostream>
-#include <string>
+#include "YTTypes.h"
 using namespace llvm;
-
-typedef int64_t i64;
-typedef int32_t i32;
-typedef int8_t i8;
-typedef uint64_t ui64;
-typedef uint32_t ui32;
-typedef uint8_t ui8;
-
-/* YT data types */
-
-enum EValueType {
-  Null,
-  Int64,
-  Uint64,
-  Double,
-  Boolean,
-  String,
-  Any // Don’t bother right now.
-};
-
-struct TValue {
-  i8 Id; // Column name.
-  i8 Type; // Column type (EValueType).
-  i32 Length; // For string-like values this fields contains size of variable part.
-  union {
-    i64 Int64;
-    ui64 Uint64;
-    double Double;
-    bool Boolean;
-    const char* String;
-  } Data;
-};
-
-struct TRowHeader
-{
-  int Count; // Number of values in a row.
-  int Padding; // Pads TRowHeader to be 16-byte.
-};
-
-using TRow = TRowHeader*;
-
-/* LLMV types for YT data types */
-
-namespace llvm {
-template<bool xcompile> class TypeBuilder<TValue, xcompile> {
- public:
-  static StructType* get(LLVMContext &context) {
-    return StructType::get(
-      TypeBuilder<types::i<16>, xcompile>::get(context),
-      TypeBuilder<types::i<16>, xcompile>::get(context),
-      TypeBuilder<types::i<32>, xcompile>::get(context),
-      TypeBuilder<types::i<64>, xcompile>::get(context),
-      NULL);
-  }
-};
-
-template<bool xcompile> class TypeBuilder<TRowHeader, xcompile> {
- public:
-  static StructType* get(LLVMContext &context) {
-    return StructType::get(
-      TypeBuilder<types::i<32>, xcompile>::get(context),
-      TypeBuilder<types::i<32>, xcompile>::get(context),
-      NULL);
-  }
-};
-}
-
-/* Exercise 1 */
+using namespace object;
 
 void func(TRow row, TValue* result)
 {
@@ -90,7 +24,7 @@ void func(TRow row, TValue* result)
   result->Data.Int64 = values[0].Data.Int64 + values[1].Data.Int64;
 }
 
-void funcIR(Module* module)
+void addFuncIRToModule(Module* module)
 {
   LLVMContext &context = getGlobalContext();
   IRBuilder<> builder(context);
@@ -144,9 +78,9 @@ void funcIR(Module* module)
   builder.CreateRetVoid();
 
   verifyFunction(*function);
-
-  module->dump();
 }
+
+/* UDFs using cached .so files */
 
 class SharedObjectMemoryManager : public SectionMemoryManager
 {
@@ -172,8 +106,9 @@ uint64_t SharedObjectMemoryManager::getSymbolAddress(const std::string &Name)
       Module* udfModule = new Module("udf", getGlobalContext());
       udfEngine = EngineBuilder(udfModule).setUseMCJIT(true).create();
 
-      ErrorOr<std::unique_ptr<MemoryBuffer>> buffer = MemoryBuffer::getFile("func.so");
-      ErrorOr<std::unique_ptr<object::ObjectFile>> object = object::ObjectFile::createObjectFile(buffer.get());
+      std::string unmangledName = Name.front() == '_' ? Name.substr(1) : Name;
+      ErrorOr<std::unique_ptr<MemoryBuffer>> buffer = MemoryBuffer::getFile(unmangledName + ".so");
+      ErrorOr<std::unique_ptr<ObjectFile>> object = ObjectFile::createObjectFile(buffer.get());
 
       udfEngine->addObjectFile(move(object.get()));
       udfEngine->finalizeObject();
@@ -182,6 +117,21 @@ uint64_t SharedObjectMemoryManager::getSymbolAddress(const std::string &Name)
     addr = (uint64_t)udfEngine->getPointerToNamedFunction(Name);
   }
   return addr;
+}
+
+ExecutionEngine* getObjectEngine(Module* module) {
+  return EngineBuilder(module)
+    .setUseMCJIT(true)
+    .setMCJITMemoryManager(new SharedObjectMemoryManager())
+    .create();
+}
+
+/* UDFs from LLVM IR */
+
+ExecutionEngine* getIREngine(Module* module) {
+  return EngineBuilder(module)
+    .setUseMCJIT(true)
+    .create();
 }
 
 int main(int argc, char** argv)
@@ -195,16 +145,12 @@ int main(int argc, char** argv)
   values[1] = { 0, EValueType::Int64, 0, { 500 } }; // int64(500)
   values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
 
-  // Run JIT-compiled func
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
   InitializeNativeTargetAsmParser();
   Module* module = new Module("addition_func", getGlobalContext());
-  funcIR(module);
-  ExecutionEngine* engine = EngineBuilder(module)
-    .setUseMCJIT(true)
-    .setMCJITMemoryManager(new SharedObjectMemoryManager())
-    .create();
+  addFuncIRToModule(module);
+  ExecutionEngine* engine = getObjectEngine(module);
 
   engine->finalizeObject();
   void* funcPtr = engine->getPointerToNamedFunction("func");
@@ -212,6 +158,5 @@ int main(int argc, char** argv)
   void(*llvmfunc)(TRow, TValue*) = (void (*)(TRow, TValue*))funcPtr;
   llvmfunc(row, &(values[2]));
 
-  printf("JIT-compiled execution: %ld\n", (long)values[2].Data.Int64);
-  values[2] = { 0, EValueType::Int64, 0, { 0 } }; // int64(0)
+  printf("Func execution: %ld (expected 1200)\n", (long)values[2].Data.Int64);
 }
