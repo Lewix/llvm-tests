@@ -9,11 +9,19 @@
 #include "llvm/IR/TypeBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/PassManager.h"
+#include "llvm/IRReader/IRReader.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "YTTypes.h"
 using namespace llvm;
 using namespace object;
@@ -128,10 +136,77 @@ ExecutionEngine* getObjectEngine(Module* module) {
 
 /* UDFs from LLVM IR */
 
+class IRMemoryManager : public SectionMemoryManager
+{
+  IRMemoryManager(const IRMemoryManager&) LLVM_DELETED_FUNCTION;
+  void operator=(const IRMemoryManager&) LLVM_DELETED_FUNCTION;
+
+public:
+  IRMemoryManager() {}
+  virtual ~IRMemoryManager() {}
+
+  virtual uint64_t getSymbolAddress(const std::string &Name);
+
+private:
+  ExecutionEngine* udfEngine = NULL;
+};
+
+uint64_t IRMemoryManager::getSymbolAddress(const std::string &Name)
+{
+  // Gets called when "call" cannot find the function
+  uint64_t addr = SectionMemoryManager::getSymbolAddress(Name);
+  if (!addr) {
+    if (!udfEngine) {
+      std::string unmangledName = Name.front() == '_' ? Name.substr(1) : Name;
+      SMDiagnostic diag;
+      Module* udfModule = ParseIRFile(unmangledName, diag, getGlobalContext());
+      udfEngine = EngineBuilder(udfModule).setUseMCJIT(true).create();
+      
+      udfEngine->finalizeObject();
+    }
+
+    addr = (uint64_t)udfEngine->getPointerToNamedFunction(Name);
+  }
+  return addr;
+}
+
 ExecutionEngine* getIREngine(Module* module) {
   return EngineBuilder(module)
     .setUseMCJIT(true)
+    //.setMCJITMemoryManager(new IRMemoryManager())
     .create();
+}
+
+void optimize(Module* module, ExecutionEngine* engine) {
+  std::cout << "BEFORE OPTIMIZATIONS" << std::endl;
+  module->dump();
+  PassManagerBuilder passManagerBuilder;
+  passManagerBuilder.OptLevel = 2;
+  passManagerBuilder.SizeLevel = 0;
+  passManagerBuilder.Inliner = createFunctionInliningPass();
+
+  FunctionPassManager* functionPassManager = new legacy::FunctionPassManager(module);
+  PassManager* modulePassManager = new PassManager();
+
+  module->setDataLayout(engine->getDataLayout()->getStringRepresentation());
+  functionPassManager->add(new DataLayoutPass(module));
+  passManagerBuilder.populateFunctionPassManager(*functionPassManager);
+
+  functionPassManager->doInitialization();
+  for (auto it = module->begin(), jt = module->end(); it != jt; ++it) {
+      if (!it->isDeclaration()) {
+          functionPassManager->run(*it);
+      }
+  }
+  functionPassManager->doFinalization();
+
+  modulePassManager->add(new DataLayoutPass(module));
+  passManagerBuilder.populateModulePassManager(*modulePassManager);
+
+  modulePassManager->run(*module);
+
+  std::cout << "AFTER OPTIMIZATIONS" << std::endl;
+  module->dump();
 }
 
 int main(int argc, char** argv)
@@ -150,7 +225,25 @@ int main(int argc, char** argv)
   InitializeNativeTargetAsmParser();
   Module* module = new Module("addition_func", getGlobalContext());
   addFuncIRToModule(module);
-  ExecutionEngine* engine = getObjectEngine(module);
+  ExecutionEngine* engine = getIREngine(module);
+
+  // Add the UDF module to engine here for now
+  SMDiagnostic diag;
+  Module* udfModule = ParseIRFile("myudf", diag, getGlobalContext());
+  Function* originalUdf = udfModule->getFunction("myudf");
+  BasicBlock& udfBody = originalUdf->getEntryBlock();
+  udfBody.removeFromParent();
+
+  Function* udf = module->getFunction("myudf");
+  udf->getBasicBlockList().push_back(&udfBody);
+
+  auto destArgs = udf->arg_begin();
+  for (auto srcArgs = originalUdf->arg_begin(); srcArgs != originalUdf->arg_end();
+       srcArgs++, destArgs++) {
+    srcArgs->replaceAllUsesWith(destArgs);
+  }
+
+  optimize(module, engine);
 
   engine->finalizeObject();
   void* funcPtr = engine->getPointerToNamedFunction("func");
