@@ -3,165 +3,82 @@
 #include <string>
 #include <functional>
 #include <unordered_map>
-#include "YTTypes.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/TypeBuilder.h"
 #include "llvm/IR/LLVMContext.h"
-using namespace llvm;
+#include "llvm/IR/Module.h"
+#include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
+#include "YTTypes.h"
+#include "TExpression.h"
+#include "FunctionRegistry.h"
+#include "LLVMCodegen.h"
 
-enum EBinaryOp {
-    // Arithmetical operations.
-    Plus,
-    Minus,
-    Multiply,
-    Divide,
-    // Integral operations.
-    Modulo,
-    // Logical operations.
-    And,
-    Or,
-    // Relational operations.
-    Equal,
-    NotEqual,
-    Less,
-    LessOrEqual,
-    Greater,
-    GreaterOrEqual
-};
-
-struct TExpression {
-  TExpression(EValueType type) : Type(type)
-  { }
-
-  virtual ~TExpression() { }
-
-  const EValueType Type;
-
-  std::string GetName() const;
-
-  template <class TDerived>
-  const TDerived* As() const
-  {
-      return dynamic_cast<const TDerived*>(this);
+Value* LLVMCodegen::generate(std::shared_ptr<TExpression> expr, IRBuilder<> builder)
+{
+  if (expr->As<TLiteralExpression>()) {
+    TLiteralExpression* literalExpr = expr->As<TLiteralExpression>();
+    switch (expr->Type) {
+      case EValueType::Int64:
+      case EValueType::Uint64: {
+        i64 literal = literalExpr->Value->Data.Int64;
+        return builder.getInt64(literal);
+      }
+      case EValueType::Double:
+        //TODO
+      case EValueType::Boolean:
+        //TODO
+      case EValueType::String:
+        //TODO
+      default:
+        return NULL;
+    }
+  } else if (expr->As<TBinaryOpExpression>()) {
+    TBinaryOpExpression* binOpExpr = expr->As<TBinaryOpExpression>();
+    Value* lhs = generate(binOpExpr->Lhs, builder);
+    Value* rhs = generate(binOpExpr->Rhs, builder);
+    std::string functionName;
+    if (binOpExpr->Opcode == EBinaryOp::Plus) {
+      functionName = "+";
+    }
+    //TODO: other opcode and overloading
+    FunctionsToEmit.push_back(functionName);
+    auto binOpSig = registry->GetFunction(functionName);
+    auto function = GetLLVMFunction(binOpSig, ExpressionModule);
+    return builder.CreateCall2(function, lhs, rhs);
   }
 
-  template <class TDerived>
-  TDerived* As()
-  {
-      return dynamic_cast<TDerived*>(this);
-  }
-};
+  return NULL;
+}
 
-struct TLiteralExpression
-    : public TExpression
+Module* emitPlus(IRBuilder<>& builder)
 {
-    TLiteralExpression(EValueType type) : TExpression(type)
-    { }
+  //TODO: overloading for uint64 and double
+  LLVMContext &context = getGlobalContext();
+  const FunctionSignature& plusSig = registry->GetFunction("+");
+  FunctionType* plusTp = LLVMCodegen::getLLVMType(plusSig);
+  Module* module = new Module("+", context);
+  Function* plusFunction = Function::Create(
+    plusTp,
+    Function::ExternalLinkage,
+    "+",
+    module);
 
-    virtual ~TLiteralExpression() { }
+  Function::arg_iterator args = plusFunction->arg_begin();
+  Argument* arg1 = args;
+  args++;
+  Argument* arg2 = args;
 
-    TLiteralExpression(
-        EValueType type,
-        std::shared_ptr<TValue> value)
-        : TExpression(type)
-        , Value(value)
-    { }
+  BasicBlock* body = BasicBlock::Create(context, "entry", plusFunction);
+  builder.SetInsertPoint(body);
 
-    std::shared_ptr<TValue> Value;
-};
+  Value* sum = builder.CreateAdd(arg1, arg2);
+  builder.CreateRet(sum);
 
-typedef std::shared_ptr<TExpression> TConstExpressionPtr;
-typedef std::vector<TConstExpressionPtr> TArguments;
+  verifyFunction(*plusFunction);
 
-struct TFunctionExpression
-    : public TExpression
-{
-    TFunctionExpression(EValueType type) : TExpression(type)
-    { }
-
-    TFunctionExpression(
-        EValueType type,
-        const std::string& functionName,
-        const TArguments& arguments)
-        : TExpression(type)
-        , FunctionName(functionName)
-        , Arguments(arguments)
-    { }
-
-    std::string FunctionName;
-    TArguments Arguments;
-};
-
-struct TBinaryOpExpression
-    : public TExpression
-{
-    TBinaryOpExpression(EValueType type) : TExpression(type)
-    { }
-
-    TBinaryOpExpression(
-        EValueType type,
-        EBinaryOp opcode,
-        const TConstExpressionPtr& lhs,
-        const TConstExpressionPtr& rhs)
-        : TExpression(type)
-        , Opcode(opcode)
-        , Lhs(lhs)
-        , Rhs(rhs)
-    { }
-
-    EBinaryOp Opcode;
-    TConstExpressionPtr Lhs;
-    TConstExpressionPtr Rhs;
-};
-
-struct FunctionSignature {
-  FunctionSignature(
-    std::string name,
-    std::vector<EValueType> argumentTypes,
-    EValueType returnType,
-    std::function<void(IRBuilder<>&)> irEmitter)
-    : Name(name)
-    , ArgumentTypes(argumentTypes)
-    , ReturnType(returnType)
-    , IREmitter(irEmitter)
-  { }
-
-  FunctionSignature(
-    const FunctionSignature& other)
-    : Name(other.Name)
-    , ArgumentTypes(other.ArgumentTypes)
-    , ReturnType(other.ReturnType)
-    , IREmitter(other.IREmitter)
-   { }
-
-  std::string Name;
-  std::vector<EValueType> ArgumentTypes;
-  EValueType ReturnType;
-  std::function<void(IRBuilder<>&)> IREmitter;
-
-};
-
-class FunctionRegistry {
-public:
-  void AddFunction(const FunctionSignature& function)
-  {
-    FunctionMap.insert(std::make_pair(function.Name, function));
-  }
-
-  const FunctionSignature& GetFunction(const std::string& functionName)
-  {
-    return FunctionMap.at(functionName);
-  }
-
-private:
-  std::unordered_map<std::string, FunctionSignature> FunctionMap;
-};
-
-FunctionRegistry* registry;
-
-void emitPlus(IRBuilder<>& builder)
-{
-  //TODO
+  return module;
 }
 
 EValueType typeOf(const TExpression* expr)
@@ -173,7 +90,8 @@ EValueType typeOf(const TExpression* expr)
     const TBinaryOpExpression* binOpExpr = expr->As<TBinaryOpExpression>();
     EValueType lhsType = typeOf(binOpExpr->Lhs.get());
     EValueType rhsType = typeOf(binOpExpr->Rhs.get());
-    if (lhsType == rhsType) {
+    // TODO: add checks for operators types. Look them up in fun registry
+    if (lhsType == rhsType == EValueType::Int64) {
       return lhsType;
     }
 
@@ -197,7 +115,6 @@ EValueType typeOf(const TExpression* expr)
 
 int main(int argc, char** argv)
 {
-  registry = new FunctionRegistry();
   std::vector<EValueType> plusArgTypes;
   plusArgTypes.push_back(EValueType::Int64);
   plusArgTypes.push_back(EValueType::Int64);
@@ -234,4 +151,20 @@ int main(int argc, char** argv)
         threeExpr));
   
   std::cout << "Type of 1 + 2 + 3 is " << typeOf(expr.get()) << std::endl;
+
+  LLVMCodegen codegen;
+  LLVMInitializeNativeTarget();
+  LLVMInitializeNativeAsmPrinter();
+  LLVMInitializeNativeAsmParser();
+  Module* module = codegen.GetExpressionModule(expr);
+  module->dump();
+
+  ExecutionEngine* engine = EngineBuilder(module)
+    .setUseMCJIT(true)
+    .create();
+  engine->finalizeObject();
+
+  void* exprFunPtr = engine->getPointerToNamedFunction("expr");
+  int(*exprFun)(void) = (int(*)(void))exprFunPtr;
+  std::cout << "Result of 1 + 2 + 3 is " << exprFun() << std::endl;
 }
