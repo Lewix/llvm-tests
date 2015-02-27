@@ -77,7 +77,39 @@ Module* emitPlusDouble(IRBuilder<>& builder)
   return module;
 }
 
-void testInt()
+Module* emitMultiplyInt(IRBuilder<>& builder)
+{
+  LLVMContext &context = getGlobalContext();
+  std::string name = FunctionRegistry::getOperatorName(EBinaryOp::Multiply);
+  const FunctionSignature* multiplySig = registry->GetFunction(
+    name,
+    EValueType::Int64);
+  FunctionType* multiplyTp = LLVMCodegen::getLLVMType(multiplySig);
+  Module* module = new Module(name, context);
+
+  Function* multiplyFunction = Function::Create(
+    multiplyTp,
+    Function::ExternalLinkage,
+    FunctionRegistry::getOperatorName(EBinaryOp::Multiply),
+    module);
+
+  Function::arg_iterator args = multiplyFunction->arg_begin();
+  Argument* arg1 = args;
+  args++;
+  Argument* arg2 = args;
+
+  BasicBlock* body = BasicBlock::Create(context, "entry", multiplyFunction);
+  builder.SetInsertPoint(body);
+
+  Value* product = builder.CreateMul(arg1, arg2);
+  builder.CreateRet(product);
+
+  verifyFunction(*multiplyFunction);
+
+  return module;
+}
+
+void testPlusInt()
 {
   // 1 + 2 + 3
   std::shared_ptr<TValue> one = std::make_shared<TValue>();
@@ -121,7 +153,7 @@ void testInt()
   std::cout << "1 + 2 + 3 = " << exprFun() << std::endl;
 }
 
-void testDouble()
+void testPlusDouble()
 {
   std::shared_ptr<TValue> one = std::make_shared<TValue>();
   one->Id = 0; one->Type = EValueType::Double; one->Length = 0;
@@ -164,33 +196,85 @@ void testDouble()
   std::cout << "1.5 + 2.0 + 3.0 = " << exprFun() << std::endl;
 }
 
+void testMultiplyInt()
+{
+  std::shared_ptr<TValue> two = std::make_shared<TValue>();
+  two->Id = 0; two->Type = EValueType::Int64; two->Length = 0;
+  two->Data = { 2 };
+  std::shared_ptr<TValue> four = std::make_shared<TValue>();
+  four->Id = 0; four->Type = EValueType::Int64; four->Length = 0;
+  four->Data = { 4 };
+  std::shared_ptr<TValue> three = std::make_shared<TValue>();
+  three->Id = 0; three->Type = EValueType::Int64; three->Length = 0;
+  three->Data = { 3 };
+
+  TConstExpressionPtr twoExpr =
+    std::make_shared<TLiteralExpression>(EValueType::Int64, two);
+  TConstExpressionPtr fourExpr =
+    std::make_shared<TLiteralExpression>(EValueType::Int64, four);
+  TConstExpressionPtr threeExpr =
+    std::make_shared<TLiteralExpression>(EValueType::Int64, three);
+
+  std::shared_ptr<TExpression> expr =
+    std::make_shared<TBinaryOpExpression>(
+      EValueType::Null,
+      EBinaryOp::Plus,
+      std::make_shared<TBinaryOpExpression>(
+        EValueType::Null,
+        EBinaryOp::Multiply,
+        twoExpr,
+        fourExpr),
+      threeExpr);
+
+  LLVMCodegen codegen;
+  Module* module = codegen.GetExpressionModule(expr);
+
+  ExecutionEngine* engine = EngineBuilder(module)
+    .setUseMCJIT(true)
+    .create();
+  engine->finalizeObject();
+
+  void* exprFunPtr = engine->getPointerToNamedFunction("expr");
+  int(*exprFun)(void) = (int(*)(void))exprFunPtr;
+  std::cout << "(2 * 4) + 3 = " << exprFun() << std::endl;
+}
+
 int main(int argc, char** argv)
 {
   LLVMInitializeNativeTarget();
   LLVMInitializeNativeAsmPrinter();
   LLVMInitializeNativeAsmParser();
 
-  std::vector<EValueType> plusDoubleArgTypes;
-  plusDoubleArgTypes.push_back(EValueType::Double);
-  plusDoubleArgTypes.push_back(EValueType::Double);
+  std::vector<EValueType> plusDoubleArgTypes({
+    EValueType::Double, EValueType::Double
+  });
   registry->AddFunction(FunctionSignature(
     FunctionRegistry::getOperatorName(EBinaryOp::Plus),
     plusDoubleArgTypes,
     EValueType::Double,
     emitPlusDouble));
 
-  std::vector<EValueType> plusIntArgTypes;
-  plusIntArgTypes.push_back(EValueType::Int64);
-  plusIntArgTypes.push_back(EValueType::Int64);
+  std::vector<EValueType> plusIntArgTypes({
+    EValueType::Int64, EValueType::Int64
+  });
   registry->AddFunction(FunctionSignature(
     FunctionRegistry::getOperatorName(EBinaryOp::Plus),
     plusIntArgTypes,
     EValueType::Int64,
     emitPlusInt));
 
+  std::vector<EValueType> multiplyIntArgTypes({
+    EValueType::Int64, EValueType::Int64
+  });
+  registry->AddFunction(FunctionSignature(
+    FunctionRegistry::getOperatorName(EBinaryOp::Multiply),
+    multiplyIntArgTypes,
+    EValueType::Int64,
+    emitMultiplyInt));
 
-  testInt();
-  testDouble();
+  testPlusInt();
+  testPlusDouble();
+  testMultiplyInt();
 
   // Other tests:
   // (2 * 4) + 3 = 11
