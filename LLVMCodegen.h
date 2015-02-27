@@ -120,8 +120,22 @@ Value* LLVMCodegen::Generate(std::shared_ptr<TExpression> expr, IRBuilder<> buil
     FunctionsToEmit.push_back(binOpSig);
     auto function = GetLLVMFunction(binOpSig, ExpressionModule);
     return builder.CreateCall2(function, lhs, rhs);
+  } else if (expr->As<TFunctionExpression>()) {
+    TFunctionExpression* funExpr = expr->As<TFunctionExpression>();
+    std::vector<Value*> llvmArgs;
+    for (auto args = funExpr->Arguments.begin();
+         args != funExpr->Arguments.end();
+         args++) {
+      llvmArgs.push_back(Generate(*args, builder));
+    }
+    auto funSig = registry->GetFunction(
+      funExpr->FunctionName,
+      typeOf(funExpr));
+    FunctionsToEmit.push_back(funSig);
+    auto function = GetLLVMFunction(funSig, ExpressionModule);
+    return builder.CreateCall(function, ArrayRef<Value*>(llvmArgs));
   }
-  //TODO: TFunctionExpression case
+  
 
   return NULL;
 }
