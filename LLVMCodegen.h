@@ -25,12 +25,10 @@ public:
     verifyFunction(*exprFun);
 
     Linker linker(ExpressionModule);
-    for (auto functionNames = FunctionsToEmit.begin();
-         functionNames != FunctionsToEmit.end();
-         functionNames++) {
-      std::string name = *functionNames;
-      auto signature = registry->GetFunction(name);
-      Module* functionModule = signature.IREmitter(builder);
+    for (auto functionSigs = FunctionsToEmit.begin();
+         functionSigs != FunctionsToEmit.end();
+         functionSigs++) {
+      Module* functionModule = (*functionSigs)->IREmitter(builder);
       linker.linkInModule(functionModule, NULL);
     }
 
@@ -53,12 +51,12 @@ public:
         return NULL;
     }
   }
-  static FunctionType* getLLVMType(const FunctionSignature& signature)
+  static FunctionType* getLLVMType(const FunctionSignature* signature)
   {
-    Type* result = getLLVMType(signature.ReturnType);
+    Type* result = getLLVMType(signature->ReturnType);
     std::vector<Type*> args;
-    auto argEValueTp = signature.ArgumentTypes.begin();
-    for (; argEValueTp != signature.ArgumentTypes.end(); argEValueTp++) {
+    auto argEValueTp = signature->ArgumentTypes.begin();
+    for (; argEValueTp != signature->ArgumentTypes.end(); argEValueTp++) {
       args.push_back(getLLVMType(*argEValueTp));
     }
     return FunctionType::get(result, ArrayRef<Type*>(args), false);
@@ -66,13 +64,13 @@ public:
 
 private:
   Module* ExpressionModule;
-  std::vector<std::string> FunctionsToEmit;
+  std::vector<const FunctionSignature*> FunctionsToEmit;
 
   Value* generate(std::shared_ptr<TExpression> expr, IRBuilder<> builder);
-  Value* GetLLVMFunction(const FunctionSignature& signature, Module* module)
+  Value* GetLLVMFunction(const FunctionSignature* signature, Module* module)
   {
     return module->getOrInsertFunction(
-      signature.Name,
+      signature->Name,
       getLLVMType(signature));
   }
 };
