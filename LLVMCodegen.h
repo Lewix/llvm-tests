@@ -3,6 +3,51 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Linker/Linker.h"
 
+EValueType typeOf(const TExpression* expr)
+{
+  if (expr->As<TLiteralExpression>()) {
+    return expr->Type;
+
+  } else if (expr->As<TBinaryOpExpression>()) {
+    const TBinaryOpExpression* binOpExpr = expr->As<TBinaryOpExpression>();
+    EValueType lhsType = typeOf(binOpExpr->Lhs.get());
+    EValueType rhsType = typeOf(binOpExpr->Rhs.get());
+    std::vector<EValueType> argTypes({ lhsType, rhsType });
+    const FunctionSignature* signature = registry->GetFunction(
+      binOpExpr->Opcode,
+      EValueType::Null,
+      &argTypes);
+    if (signature->ArgumentTypes.size() == 2
+        && signature->ArgumentTypes[0] == lhsType
+        && signature->ArgumentTypes[1] == rhsType) {
+      return signature->ReturnType;
+    }
+
+  } else if (expr->As<TFunctionExpression>()) {
+    const TFunctionExpression* funExpr = expr->As<TFunctionExpression>();
+    std::vector<EValueType> argTypes;
+    for (auto args = funExpr->Arguments.begin();
+         args != funExpr->Arguments.end();
+         args++) {
+      argTypes.push_back((*args)->Type);
+    }
+    const FunctionSignature* signature = registry->GetFunction(
+      funExpr->FunctionName,
+      EValueType::Null,
+      &argTypes);
+    auto arg = funExpr->Arguments.begin();
+    auto tpe = signature->ArgumentTypes.begin();
+    for (; arg != funExpr->Arguments.end();
+         arg++, tpe++) {
+      if (typeOf(arg->get()) != *tpe) {
+        return EValueType::Null;
+      }
+    }
+    return signature->ReturnType;
+  }
+
+  return EValueType::Null;
+}
 class LLVMCodegen {
 public:
   LLVMCodegen() : ExpressionModule(new Module("expr", getGlobalContext())) { }
@@ -11,7 +56,7 @@ public:
   {
     LLVMContext& context = getGlobalContext();
     IRBuilder<> builder(context);
-    FunctionType* funTp = TypeBuilder<types::i<64>(void), true>::get(context);
+    FunctionType* funTp = getLLVMType(typeOf(expr.get()), std::vector<EValueType>());
     Function* exprFun = Function::Create(
       funTp,
       Function::ExternalLinkage,
@@ -53,10 +98,15 @@ public:
   }
   static FunctionType* getLLVMType(const FunctionSignature* signature)
   {
-    Type* result = getLLVMType(signature->ReturnType);
+    return getLLVMType(signature->ReturnType, signature->ArgumentTypes);
+  }
+
+  static FunctionType* getLLVMType(EValueType resultType, std::vector<EValueType> argTypes)
+  {
+    Type* result = getLLVMType(resultType);
     std::vector<Type*> args;
-    auto argEValueTp = signature->ArgumentTypes.begin();
-    for (; argEValueTp != signature->ArgumentTypes.end(); argEValueTp++) {
+    auto argEValueTp = argTypes.begin();
+    for (; argEValueTp != argTypes.end(); argEValueTp++) {
       args.push_back(getLLVMType(*argEValueTp));
     }
     return FunctionType::get(result, ArrayRef<Type*>(args), false);
