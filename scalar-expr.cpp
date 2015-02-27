@@ -10,51 +10,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
-#include "YTTypes.h"
-#include "TExpression.h"
-#include "FunctionRegistry.h"
 #include "LLVMCodegen.h"
-
-Value* LLVMCodegen::generate(std::shared_ptr<TExpression> expr, IRBuilder<> builder)
-{
-  LLVMContext& context = getGlobalContext();
-  if (expr->As<TLiteralExpression>()) {
-    TLiteralExpression* literalExpr = expr->As<TLiteralExpression>();
-    switch (expr->Type) {
-      case EValueType::Int64:
-      case EValueType::Uint64: {
-        i64 literal = literalExpr->Value->Data.Int64;
-        return builder.getInt64(literal);
-      }
-      case EValueType::Double: {
-        double literal = literalExpr->Value->Data.Double;
-        return ConstantFP::get(Type::getDoubleTy(context), literal);
-      }
-      case EValueType::Boolean: {
-        bool literal = literalExpr->Value->Data.Boolean;
-        return builder.getInt1(literal);
-      }
-      case EValueType::String: {
-        //TODO
-      }
-      default:
-        return NULL;
-    }
-  } else if (expr->As<TBinaryOpExpression>()) {
-    TBinaryOpExpression* binOpExpr = expr->As<TBinaryOpExpression>();
-    Value* lhs = generate(binOpExpr->Lhs, builder);
-    Value* rhs = generate(binOpExpr->Rhs, builder);
-    auto binOpSig = registry->GetFunction(
-      binOpExpr->Opcode,
-      typeOf(binOpExpr));
-    FunctionsToEmit.push_back(binOpSig);
-    auto function = GetLLVMFunction(binOpSig, ExpressionModule);
-    return builder.CreateCall2(function, lhs, rhs);
-  }
-  //TODO: TFunctionExpression case
-
-  return NULL;
-}
+using namespace TExpressionTyper;
 
 Module* emitPlusInt(IRBuilder<>& builder)
 {
@@ -213,7 +170,6 @@ int main(int argc, char** argv)
   LLVMInitializeNativeAsmPrinter();
   LLVMInitializeNativeAsmParser();
 
-
   std::vector<EValueType> plusDoubleArgTypes;
   plusDoubleArgTypes.push_back(EValueType::Double);
   plusDoubleArgTypes.push_back(EValueType::Double);
@@ -237,6 +193,5 @@ int main(int argc, char** argv)
   testDouble();
 
   // Other tests:
-  // 1.5 + 2.0 + 3.0 = 6.5
   // (2 * 4) + 3 = 11
 }
